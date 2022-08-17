@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
 
 type Server struct {
@@ -27,48 +30,125 @@ func NewServer(ip string, port int) *Server {
 }
 
 //
-func (this *Server) ListenMessager() {
+func (s *Server) ListenMessager() {
 	for {
-		msg := <-this.Message
+		msg := <-s.Message
 
 		//
-		this.mapLock.Lock()
-		for _, cli := range this.OnlineMap {
+		s.mapLock.Lock()
+		for _, cli := range s.OnlineMap {
 			cli.msgc <- msg
 		}
-		this.mapLock.Unlock()
+		s.mapLock.Unlock()
 	}
 }
 
 //broadcast
-func (this *Server) Broadcast(user *User, msg string) {
+func (s *Server) Broadcast(user *User, msg string) {
 	sendmsg := "[" + user.Addr + "]" + user.Name + ":" + msg
-	this.Message <- sendmsg
+	s.Message <- sendmsg
+}
+
+//show all user
+func (s *Server) show(user *User) {
+	msg := "Now online:\n"
+	for _, usr := range s.OnlineMap {
+		msg += "[" + usr.Addr + "]" + usr.Name + "\n"
+	}
+	user.msgc <- msg
 }
 
 //handler
-func (this *Server) Handler(conn net.Conn) {
+func (s *Server) Handler(conn net.Conn) {
 	fmt.Println("connect success")
 
 	user := NewUser(conn)
 
 	//user online
-	this.mapLock.Lock()
-	this.OnlineMap[user.Name] = user
-	this.mapLock.Unlock()
+	s.mapLock.Lock()
+	s.OnlineMap[user.Name] = user
+	s.mapLock.Unlock()
 
 	//broadcast online msg
-	this.Broadcast(user, "online now")
+	s.Broadcast(user, "online now")
 
-	//
-	select {}
+	//is user alive
+	isLive := make(chan bool)
+	//recevive client message
+	go func() {
+		buff := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buff)
+			if n == 0 {
+				s.Broadcast(user, "offline now")
+				s.mapLock.Lock()
+				delete(s.OnlineMap, user.Name)
+				s.mapLock.Unlock()
+				return
+			}
+			if err != nil && err != io.EOF {
+				fmt.Println("conn read err", err)
+			}
+			//delete '\n'
+			msg := string(buff[:n-1])
+			//broadcast message
+			if msg == "show" {
+				//show all online user
+				s.show(user)
+			} else if len(msg) > 7 && msg[:7] == "rename|" {
+				//rename user name
+				//rename|[newName]
+				name := strings.Split(msg, "|")[1]
+				_, ok := s.OnlineMap[name]
+				if ok {
+					user.msgc <- "already use"
+				} else {
+					s.mapLock.Lock()
+					delete(s.OnlineMap, user.Name)
+					s.OnlineMap[name] = user
+					s.mapLock.Unlock()
+					user.Name = name
+				}
+			} else if len(msg) > 4 && msg[:3] == "to|" {
+				//private chat
+				// to|[name]|[msg]
+				name := strings.Split(msg, "|")[1]
+				if name == "" {
+					user.msgc <- "wrong commend"
+					return
+				}
+				remoteUser, ok := s.OnlineMap[name]
+				if !ok {
+					user.msgc <- "invalid user name"
+					return
+				}
 
+				content := strings.Split(msg, "|")[2]
+				remoteUser.msgc <- "user " + user.Name + " say to you:" + content
+			} else {
+				s.Broadcast(user, msg)
+			}
+			isLive <- true
+		}
+	}()
+	for {
+		select {
+		case <-isLive:
+			//now user is active
+		case <-time.After(time.Second * 300):
+			//5min time off
+			user.msgc <- "connect close"
+			time.Sleep(1)
+			close(user.msgc)
+			conn.Close()
+		}
+	}
 }
 
 // start server interface
-func (this *Server) start() {
+func (s *Server) start() {
 	//socket listen
-	listener, err := net.Listen("tcp", this.Ip+":"+strconv.Itoa(this.Port))
+	listener, err := net.Listen("tcp", s.Ip+":"+strconv.Itoa(s.Port))
 	if err != nil {
 		fmt.Println("net.Listen err", err)
 		return
@@ -76,7 +156,8 @@ func (this *Server) start() {
 	//close listen socket
 	defer listener.Close()
 
-	go this.ListenMessager()
+	//listen user online
+	go s.ListenMessager()
 
 	for {
 		//accept
@@ -86,6 +167,6 @@ func (this *Server) start() {
 			continue
 		}
 		//do handler
-		go this.Handler(conn)
+		go s.Handler(conn)
 	}
 }

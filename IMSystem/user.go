@@ -25,9 +25,9 @@ func NewUser(conn net.Conn) *User {
 }
 
 //listen user channel
-func (this *User) ListenMessage() {
+func (u *User) ListenMessage() {
 	for {
-		msg := <-this.msgc
-		this.conn.Write([]byte(msg + "\n"))
+		msg := <-u.msgc
+		u.conn.Write([]byte(msg + "\n"))
 	}
 }
